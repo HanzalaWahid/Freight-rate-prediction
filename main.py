@@ -1,16 +1,17 @@
 """
 main.py
 =======
-Single entry point: raw data -> all outputs.
-
-Usage:
-    python main.py
-    python main.py --skip-cv
+Inference and evaluation pipeline only (no training, no CV):
+  1. Check required artifacts exist
+  2. Predict validation.csv -> validation_predictions.csv and fill data/december_chart_inputs.csv
+  3. Run score.py
+  4. Generate reports/report.pdf (reads oof_eval.npz and cv_results.csv)
+  5. Print final checklist
 """
 
 from __future__ import annotations
 
-import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -18,50 +19,44 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import BASE_DIR, VALIDATION_PREDICTIONS_PATH, DECEMBER_INPUTS_PATH, ARTIFACTS_DIR
+from src.predict import make_predictions
+from src.report import generate_report
 
 
-def _run_step(step_name: str, fn):
-    print(f"\n{'='*60}")
-    print(f"STEP: {step_name}")
-    print("=" * 60)
-    fn()
+def check_artifacts() -> bool:
+    meta_path = ARTIFACTS_DIR / "cv_meta.json"
+    if not meta_path.exists():
+        return False
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except Exception:
+        return False
+
+    best_model = meta.get("best_model", "catboost")
+    required = [
+        ARTIFACTS_DIR / f"{best_model}_model.pkl",
+        ARTIFACTS_DIR / "city_encoder.pkl",
+        ARTIFACTS_DIR / "pair_encoder.pkl",
+        ARTIFACTS_DIR / "coord_lookup.pkl",
+        ARTIFACTS_DIR / "imp_stats.pkl",
+        ARTIFACTS_DIR / "cv_meta.json",
+        ARTIFACTS_DIR / "oof_eval.npz",
+    ]
+    return all(p.exists() for p in required)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Freight Rate Prediction Pipeline")
-    parser.add_argument(
-        "--skip-cv",
-        action="store_true",
-        help="Skip cross-validation if cv_results.csv and cv_meta.json exist",
-    )
-    args = parser.parse_args()
+    if not check_artifacts():
+        print("Run `python train.py` first.")
+        sys.exit(1)
 
-    # Step a: Cross-Validation
-    skip_cv = args.skip_cv and (ARTIFACTS_DIR / "cv_results.csv").exists() and (ARTIFACTS_DIR / "cv_meta.json").exists()
-    if skip_cv:
-        print(f"\n{'='*60}")
-        print("STEP: Cross-Validation (SKIPPED via --skip-cv)")
-        print("=" * 60)
-        if not (ARTIFACTS_DIR / "oof_eval.npz").exists():
-            from src.report import _get_or_compute_oof_predictions
-            _get_or_compute_oof_predictions()
-    else:
-        from src.train_cv import run_cv
-        _run_step("Cross-Validation + Optuna Tuning", run_cv)
-        if not (ARTIFACTS_DIR / "oof_eval.npz").exists():
-            from src.report import _get_or_compute_oof_predictions
-            _get_or_compute_oof_predictions()
+    print("\n" + "=" * 60)
+    print("STEP: Generating Predictions")
+    print("=" * 60)
+    make_predictions()
 
-    # Step b: Final model training on all data
-    from src.train_final import run_final_training
-    _run_step("Final Model Training (all train data)", run_final_training)
-
-    # Step c: Generate predictions
-    from src.predict import make_predictions
-    _run_step("Generating Predictions", make_predictions)
-
-    # Step d: Run score.py
-    print(f"\n{'='*60}")
+    print("\n" + "=" * 60)
     print("STEP: Running score.py")
     print("=" * 60)
     result = subprocess.run(
@@ -81,9 +76,10 @@ def main():
         sys.exit(1)
     print("scorer passed")
 
-    # Step e: Generate PDF report
-    from src.report import generate_report
-    _run_step("Generating PDF Report", generate_report)
+    print("\n" + "=" * 60)
+    print("STEP: Generating PDF Report")
+    print("=" * 60)
+    generate_report()
 
     # Final checklist
     print("\n" + "=" * 60)
@@ -121,9 +117,6 @@ def main():
     report_path = BASE_DIR / "reports" / "report.pdf"
     checks.append(("reports/report.pdf -- EXISTS", report_path.exists()))
 
-    loom_path = BASE_DIR / "LOOM_SCRIPT.md"
-    checks.append(("LOOM_SCRIPT.md -- EXISTS", loom_path.exists()))
-
     readme_path = BASE_DIR / "README.md"
     checks.append(("README.md -- EXISTS", readme_path.exists()))
 
@@ -131,11 +124,7 @@ def main():
         icon = "[OK]" if ok else "[FAIL]"
         print(f"  {icon} {name}")
 
-    all_ok = all(ok for _, ok in checks)
-    if all_ok:
-        print("\n[PASS] All checks passed! Ready to submit.")
-    else:
-        print("\n[WARN] Some checks failed.")
+    if not all(ok for _, ok in checks):
         sys.exit(1)
 
 

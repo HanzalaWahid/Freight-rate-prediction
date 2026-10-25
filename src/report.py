@@ -42,49 +42,12 @@ def _load_cv_meta():
     return {}
 
 
-def _get_or_compute_oof_predictions():
+def _get_oof_predictions():
     oof_path = ARTIFACTS_DIR / "oof_eval.npz"
-    if oof_path.exists():
-        data = np.load(oof_path)
-        return data["y_true"], data["y_pred"]
-
-    cv_meta = _load_cv_meta()
-    best_params = cv_meta.get("best_params", {})
-    feature_cols = cv_meta.get("feature_cols")
-
-    from src.data_cleaning import load_and_clean_train, fit_imputer, apply_imputer
-    from src.features import build_features
-    from src.validation import get_time_folds
-    from src.models import train_catboost
-
-    train_df = load_and_clean_train().sort_values("date").reset_index(drop=True)
-    folds = get_time_folds(train_df, n_folds=3)
-
-    y_trues, y_preds = [], []
-    for fold_num, (tr_idx, val_idx) in enumerate(folds, 1):
-        tr_fold = train_df.iloc[tr_idx].copy()
-        val_fold = train_df.iloc[val_idx].copy()
-        imp_stats = fit_imputer(tr_fold)
-        tr_fold = apply_imputer(tr_fold, imp_stats)
-        val_fold = apply_imputer(val_fold, imp_stats)
-        X_tr, city_enc, pair_enc, coord_lk = build_features(
-            tr_fold, target=tr_fold["posted_rate"], fit=True, feature_cols=feature_cols
-        )
-        X_val, _, _, _ = build_features(
-            val_fold, city_encoder=city_enc, pair_encoder=pair_enc,
-            coord_lookup=coord_lk, fit=False, feature_cols=feature_cols
-        )
-        y_tr = tr_fold["posted_rate"].values
-        y_val = val_fold["posted_rate"].values
-        model = train_catboost(X_tr, y_tr, X_val, y_val, params=best_params)
-        preds = np.clip(model.predict(X_val), 1.0, None)
-        y_trues.append(y_val)
-        y_preds.append(preds)
-
-    y_true = np.concatenate(y_trues)
-    y_pred = np.concatenate(y_preds)
-    np.savez(oof_path, y_true=y_true, y_pred=y_pred)
-    return y_true, y_pred
+    if not oof_path.exists():
+        raise FileNotFoundError(f"Missing {oof_path}. Run `python train.py` first.")
+    data = np.load(oof_path)
+    return data["y_true"], data["y_pred"]
 
 
 def _make_pred_vs_actual_chart(y_true: np.ndarray, y_pred: np.ndarray) -> Path:
@@ -344,7 +307,7 @@ def generate_report():
 
     # ── Page 3: Error Analysis ────────────────────────────────────────
     story.append(Paragraph("5. Error Analysis", h1))
-    y_true_oof, y_pred_oof = _get_or_compute_oof_predictions()
+    y_true_oof, y_pred_oof = _get_oof_predictions()
     pred_fig = _make_pred_vs_actual_chart(y_true_oof, y_pred_oof)
     cm_fig, acc_overall, acc_within_one = _make_binned_confusion_matrix(y_true_oof, y_pred_oof)
 
